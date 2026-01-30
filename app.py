@@ -22,7 +22,7 @@ from sklearn.neighbors import KNeighborsClassifier
 # ======================================================
 # CONFIG
 # ======================================================
-DEFAULT_DATA_PATH = "heart_failure.csv"      # taruh sefolder app.py (di repo)
+DEFAULT_DATA_PATH = "heart_failure_clinical_records_dataset (1).csv"      # taruh sefolder app.py (di repo)
 DEFAULT_TARGET = "DEATH_EVENT"
 
 
