@@ -537,11 +537,12 @@ elif page == "Metode Terbaik":
 
 
 # ======================================================
-# PREDIKSI (FORM INPUT PASIEN)
+# ======================================================
+# PREDIKSI (FORM INPUT PASIEN + INTERPRETASI)
 # ======================================================
 elif page == "Prediksi":
     st.markdown('<div class="section-title">🧾 Prediksi Risiko (Input Pasien)</div>', unsafe_allow_html=True)
-    st.caption("input numerik + interpretasi kategori klinis")
+    st.caption("input numerik + interpretasi singkat + hasil prediksi")
 
     df_train = st.session_state.df
     target = st.session_state.target
@@ -557,17 +558,18 @@ elif page == "Prediksi":
 
         st.markdown(f'<div class="success-wrap">✅ Model aktif: <b>{best_name}</b></div>', unsafe_allow_html=True)
 
-        # helper default median
-        def default_val(col):
+        # ---------- helper default median ----------
+        def default_val(col: str) -> float:
             try:
                 return float(df_train[col].median())
             except Exception:
                 return 0.0
 
-        # label lebih enak
+        # ---------- label lebih rapi ----------
         label_map = {
             "age": "Usia (Tahun)",
             "sex": "Jenis Kelamin",
+            "anaemia": "Anaemia",
             "diabetes": "Diabetes",
             "high_blood_pressure": "Tekanan Darah Tinggi",
             "smoking": "Merokok",
@@ -577,50 +579,51 @@ elif page == "Prediksi":
             "serum_sodium": "Serum Sodium",
             "platelets": "Platelets",
             "time": "Follow-up Time (days)",
-            "anaemia": "Anaemia",
         }
 
+        # ---------- input form ----------
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.subheader("📋 Input Data Pasien")
 
-        # layout 3 kolom seperti contoh
         c1, c2, c3 = st.columns(3)
         input_dict = {}
 
-        # ========= kolom 1 =========
+        # kolom 1
         with c1:
             if "age" in feature_cols:
-                input_dict["age"] = st.number_input(label_map["age"], 0.0, 120.0, default_val("age"), 1.0)
-
+                input_dict["age"] = st.number_input(
+                    label_map["age"], min_value=0.0, max_value=120.0,
+                    value=default_val("age"), step=1.0
+                )
             if "creatinine_phosphokinase" in feature_cols:
                 input_dict["creatinine_phosphokinase"] = st.number_input(
-                    label_map["creatinine_phosphokinase"], 0.0, value=default_val("creatinine_phosphokinase"), step=1.0
+                    label_map["creatinine_phosphokinase"], min_value=0.0,
+                    value=default_val("creatinine_phosphokinase"), step=1.0
                 )
-
             if "ejection_fraction" in feature_cols:
                 input_dict["ejection_fraction"] = st.number_input(
-                    label_map["ejection_fraction"], 0.0, 100.0, default_val("ejection_fraction"), 1.0
+                    label_map["ejection_fraction"], min_value=0.0, max_value=100.0,
+                    value=default_val("ejection_fraction"), step=1.0
                 )
 
-        # ========= kolom 2 =========
+        # kolom 2
         with c2:
             if "sex" in feature_cols:
                 sex_opt = st.selectbox(label_map["sex"], ["Female", "Male"], index=1)
                 input_dict["sex"] = 1.0 if sex_opt == "Male" else 0.0
-
             if "serum_creatinine" in feature_cols:
                 input_dict["serum_creatinine"] = st.number_input(
-                    label_map["serum_creatinine"], 0.0, value=default_val("serum_creatinine"), step=0.1
+                    label_map["serum_creatinine"], min_value=0.0,
+                    value=default_val("serum_creatinine"), step=0.1
                 )
-
             if "serum_sodium" in feature_cols:
                 input_dict["serum_sodium"] = st.number_input(
-                    label_map["serum_sodium"], 0.0, value=default_val("serum_sodium"), step=1.0
+                    label_map["serum_sodium"], min_value=0.0,
+                    value=default_val("serum_sodium"), step=1.0
                 )
 
-        # ========= kolom 3 =========
+        # kolom 3
         with c3:
-            # indikator komorbid biner
             for bin_col in ["anaemia", "diabetes", "high_blood_pressure", "smoking"]:
                 if bin_col in feature_cols:
                     v = st.selectbox(label_map.get(bin_col, bin_col), ["Tidak", "Ya"], index=int(round(default_val(bin_col))))
@@ -628,15 +631,51 @@ elif page == "Prediksi":
 
             if "platelets" in feature_cols:
                 input_dict["platelets"] = st.number_input(
-                    label_map["platelets"], 0.0, value=default_val("platelets"), step=1000.0
+                    label_map["platelets"], min_value=0.0,
+                    value=default_val("platelets"), step=1000.0
                 )
 
-        # full width bawah (misal time)
+        # bawah full width
         if "time" in feature_cols:
-            input_dict["time"] = st.number_input(label_map["time"], 0.0, value=default_val("time"), step=1.0)
+            input_dict["time"] = st.number_input(
+                label_map["time"], min_value=0.0,
+                value=default_val("time"), step=1.0
+            )
 
         st.markdown("</div>", unsafe_allow_html=True)
 
+        # ---------- interpretasi awal ----------
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.subheader("🩺 Interpretasi Awal Input")
+
+        notes = []
+
+        if "age" in input_dict:
+            notes.append("usia termasuk lansia" if input_dict["age"] >= 60 else "usia termasuk dewasa")
+
+        if "serum_creatinine" in input_dict:
+            # ambang sederhana presentasi (bukan diagnosis)
+            notes.append("kadar kreatinin cenderung tinggi" if input_dict["serum_creatinine"] > 1.3 else "kadar kreatinin dalam batas normal")
+
+        if "ejection_fraction" in input_dict:
+            notes.append("fungsi pompa jantung rendah" if input_dict["ejection_fraction"] < 40 else "fungsi pompa jantung masih cukup baik")
+
+        # komorbid ringkas
+        comorb = []
+        for cc in ["anaemia", "diabetes", "high_blood_pressure", "smoking"]:
+            if cc in input_dict and input_dict[cc] == 1.0:
+                comorb.append(label_map.get(cc, cc).lower())
+        if len(comorb) > 0:
+            notes.append("ada faktor komorbid: " + ", ".join(comorb))
+        else:
+            notes.append("tidak ada komorbid utama yang dipilih")
+
+        st.write("• " + "\n• ".join(notes))
+        st.caption("catatan: interpretasi ini hanya ringkasan aturan sederhana untuk membantu penjelasan, bukan diagnosis.")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # ---------- tombol prediksi ----------
         st.markdown('<div class="card">', unsafe_allow_html=True)
         run = st.button("🔍 Prediksi Risiko", use_container_width=True)
 
@@ -659,13 +698,20 @@ elif page == "Prediksi":
 
             if pred == 1:
                 st.error("⚠️ Prediksi: Risiko Tinggi (kelas 1)")
+                hasil_teks = "model memprediksi pasien memiliki risiko yang lebih tinggi"
             else:
                 st.success("✅ Prediksi: Risiko Rendah (kelas 0)")
+                hasil_teks = "model memprediksi pasien berada pada risiko lebih rendah"
 
             if proba is not None:
                 st.info(f"Probabilitas kelas 1 (risiko tinggi): {proba:.3f}")
 
-            st.caption("catatan: ini prediksi model dari pola data training, bukan diagnosis medis.")
+            st.markdown("### 🧠 Kesimpulan Model")
+            st.write(
+                f"berdasarkan data yang dimasukkan, {hasil_teks}. "
+                "hasil ini berasal dari pola data training dan dipakai sebagai alat bantu analisis, bukan diagnosis medis."
+            )
+
         st.markdown("</div>", unsafe_allow_html=True)
 
 
