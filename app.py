@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -9,8 +10,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 
 from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score,
-    roc_auc_score
+    accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 )
 
 from sklearn.linear_model import LogisticRegression
@@ -22,7 +22,7 @@ from sklearn.neighbors import KNeighborsClassifier
 # ======================================================
 # CONFIG
 # ======================================================
-DEFAULT_DATA_PATH = "heart_failure_clinical_records_dataset (1).csv"  # taruh sefolder app.py di repo
+DEFAULT_DATA_PATH = "heart_failure.csv"      # taruh sefolder app.py (di repo)
 DEFAULT_TARGET = "DEATH_EVENT"
 
 
@@ -101,7 +101,7 @@ def header():
         """
         <div class="big-header">
             <div class="big-title">🧾 Dashboard Analisis Kesehatan</div>
-            <div class="big-sub">about → dataset → preprocessing → visualisasi → machine learning (5 metode + terbaik + langkah) → analysis terbaik → prediksi → contact</div>
+            <div class="big-sub">about → dataset → preprocessing → visualisasi → machine learning (5 metode) → metode terbaik → prediksi → contact</div>
         </div>
         """,
         unsafe_allow_html=True
@@ -112,32 +112,24 @@ def read_csv_cached(path: str):
     return pd.read_csv(path)
 
 def try_load_default():
-    # AUTO LOAD: Streamlit Cloud bisa baca file yang ada di repo
-    try:
+    # cari file default di folder kerja (repo)
+    if os.path.exists(DEFAULT_DATA_PATH):
         return read_csv_cached(DEFAULT_DATA_PATH)
-    except Exception:
-        return None
-
-def normalize_cols(df: pd.DataFrame) -> pd.DataFrame:
-    d = df.copy()
-    d.columns = [c.strip() for c in d.columns]
-    return d
-
-def find_target_col(df: pd.DataFrame, target_name: str):
-    t = (target_name or "").strip().lower()
-    for c in df.columns:
-        if c.strip().lower() == t:
-            return c
     return None
+
+def reset_training_state():
+    st.session_state.trained_all = False
+    st.session_state.results = None
+    st.session_state.best_model_name = None
+    st.session_state.best_pipeline = None
+    st.session_state.best_metrics = None
+    st.session_state.feature_cols = None
 
 def init_state():
     if "df" not in st.session_state:
         st.session_state.df = try_load_default()
     if "target" not in st.session_state:
-        st.session_state.target = DEFAULT_TARGET.strip()
-
-    if "preprocessed" not in st.session_state:
-        st.session_state.preprocessed = False
+        st.session_state.target = DEFAULT_TARGET
 
     if "trained_all" not in st.session_state:
         st.session_state.trained_all = False
@@ -151,12 +143,15 @@ def init_state():
     if "best_metrics" not in st.session_state:
         st.session_state.best_metrics = None
 
-def reset_training():
-    st.session_state.trained_all = False
-    st.session_state.results = None
-    st.session_state.best_model_name = None
-    st.session_state.best_pipeline = None
-    st.session_state.best_metrics = None
+    if "feature_cols" not in st.session_state:
+        st.session_state.feature_cols = None
+
+def kpi_df(df: pd.DataFrame):
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Records", int(df.shape[0]))
+    c2.metric("Jumlah Kolom", int(df.shape[1]))
+    c3.metric("Missing (Total)", int(df.isna().sum().sum()))
+    c4.metric("Target", st.session_state.target)
 
 def get_models():
     return {
@@ -187,97 +182,29 @@ def eval_binary(y_true, y_pred, y_proba=None):
     auc = safe_auc(y_true, y_proba) if y_proba is not None else None
     return {"accuracy": acc, "precision": prec, "recall": rec, "f1": f1v, "auc": auc}
 
-def kpi_df(df: pd.DataFrame, target_col: str | None):
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Records", int(df.shape[0]))
-    c2.metric("Jumlah Kolom", int(df.shape[1]))
-    c3.metric("Missing (Total)", int(df.isna().sum().sum()))
-    c4.metric("Target", target_col if target_col else st.session_state.target)
-
-def clean_Xy(df: pd.DataFrame, target_name: str):
+def clean_Xy(df: pd.DataFrame, target: str):
     if df is None:
-        return None, None, None, "dataset kosong."
+        return None, None, "dataset kosong / belum kebaca."
+    if target not in df.columns:
+        return None, None, f"kolom target '{target}' tidak ditemukan."
 
-    df2 = normalize_cols(df)
-    target_col = find_target_col(df2, target_name)
-    if target_col is None:
-        return None, None, None, f"kolom target '{target_name}' tidak ditemukan."
+    X = df.drop(columns=[target]).copy()
+    y = df[target].copy()
 
-    X = df2.drop(columns=[target_col]).copy()
-    y = df2[target_col].copy()
-
-    # hanya numerik
-    X = X.select_dtypes(include=[np.number])
+    # ambil numerik saja (stabil)
+    X = X.select_dtypes(include=[np.number]).copy()
     X = X.dropna(axis=1, how="all")
 
     uniq = sorted(pd.Series(y).dropna().unique().tolist())
     if len(uniq) != 2:
-        return None, None, target_col, f"target harus biner (2 kelas). nilai target sekarang: {uniq}"
+        return None, None, f"target harus biner (2 kelas). nilai target sekarang: {uniq}"
 
-    return X, y, target_col, None
-
-
-def render_steps_for_best_model(best_name: str):
-    st.subheader("🧾 Langkah Metode Terbaik (sesuai pemenang)")
-
-    st.markdown("### langkah umum (selalu sama)")
-    st.write("1) data dipilih: fitur (X) = semua kolom numerik selain target, target (y) = label 0/1.")
-    st.write("2) split data train-test (misal 80:20) pakai stratify supaya proporsi 0/1 tetap seimbang.")
-    st.write("3) scaling fitur pakai StandardScaler (di Pipeline).")
-    st.write("4) model dilatih di data train, lalu diuji di data test.")
-    st.write("5) evaluasi pakai accuracy, precision, recall, f1-score (AUC jika tersedia).")
-
-    st.divider()
-    st.markdown("### langkah khusus model pemenang")
-
-    if "Random Forest" in best_name:
-        st.write("Random Forest = kumpulan banyak decision tree yang voting untuk menentukan hasil akhir.")
-        st.write("1) membuat banyak pohon (n_estimators).")
-        st.write("2) setiap pohon dilatih dari sampel acak (bootstrap).")
-        st.write("3) setiap split hanya mempertimbangkan sebagian fitur (random feature selection).")
-        st.write("4) tiap pohon memprediksi 0/1, hasil akhir = voting mayoritas.")
-        st.write("5) probabilitas risiko = proporsi vote kelas 1.")
-        st.write("6) faktor penting ditampilkan lewat feature importance.")
-        return
-
-    if "Gradient Boosting" in best_name:
-        st.write("Gradient Boosting = membangun model bertahap, model baru fokus memperbaiki error model sebelumnya.")
-        st.write("1) mulai dari prediksi awal (baseline).")
-        st.write("2) hitung error/loss dari prediksi.")
-        st.write("3) buat tree kecil untuk mempelajari residual (kesalahan).")
-        st.write("4) tambahkan tree baru ke model, ulangi sampai jumlah estimator tercapai.")
-        st.write("5) hasil akhir adalah gabungan semua tree berurutan (boosting).")
-        st.write("6) faktor penting ditampilkan lewat feature importance.")
-        return
-
-    if "Logistic Regression" in best_name:
-        st.write("Logistic Regression = menghitung probabilitas kelas 1 pakai fungsi sigmoid.")
-        st.write("1) hitung skor linear (w·x + b).")
-        st.write("2) ubah ke probabilitas dengan sigmoid (0–1).")
-        st.write("3) proba >= 0.5 → kelas 1, selain itu → kelas 0.")
-        st.write("4) koefisien terbesar menunjukkan fitur yang paling menaikkan/menurunkan risiko.")
-        return
-
-    if "SVM" in best_name:
-        st.write("SVM (RBF) = mencari batas pemisah terbaik, dan kernel RBF bantu menangani pola non-linear.")
-        st.write("1) data dipetakan ke ruang fitur via kernel RBF.")
-        st.write("2) cari hyperplane dengan margin terbesar.")
-        st.write("3) support vectors adalah titik paling berpengaruh.")
-        st.write("4) hasil kelas ditentukan dari sisi hyperplane; probabilitas (jika ada) dari kalibrasi internal.")
-        return
-
-    if "KNN" in best_name:
-        st.write("KNN = prediksi berdasarkan tetangga terdekat.")
-        st.write("1) tentukan K (misal 7).")
-        st.write("2) hitung jarak data uji ke semua data train.")
-        st.write("3) ambil K tetangga terdekat.")
-        st.write("4) voting mayoritas → kelas 0/1.")
-        st.write("5) probabilitas kelas 1 = proporsi tetangga bernilai 1.")
-        return
-
-    st.info("langkah khusus belum tersedia untuk model ini (tapi langkah umum tetap berlaku).")
+    return X, y, None
 
 
+# ======================================================
+# INIT
+# ======================================================
 init_state()
 header()
 
@@ -294,7 +221,7 @@ page = st.sidebar.radio(
         "Preprocessing",
         "Visualisasi",
         "Machine Learning (5 Metode)",
-        "Analysis Terbaik",
+        "Metode Terbaik",
         "Prediksi",
         "Contact",
     ],
@@ -309,8 +236,11 @@ if page == "About":
     st.markdown('<div class="section-title">📘 About</div>', unsafe_allow_html=True)
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.write("dashboard ini dibuat untuk analisis data kesehatan dan klasifikasi risiko.")
-    st.write("alur kerja: dataset → preprocessing → visualisasi → train 5 model → pilih terbaik → jelaskan langkah model terbaik → analisis faktor → prediksi.")
-    st.markdown('<div class="small-note">tips presentasi: sebut “prediksi risiko” (bukan meramal). target 0/1 adalah label hasil.</div>', unsafe_allow_html=True)
+    st.write("alur kerja: dataset → preprocessing → visualisasi → bandingkan 5 model → ambil metode terbaik → prediksi input pasien.")
+    st.markdown(
+        '<div class="small-note">catatan: target 0/1 adalah label hasil (bukan “meramal”), dan digunakan untuk klasifikasi.</div>',
+        unsafe_allow_html=True
+    )
     st.markdown("</div>", unsafe_allow_html=True)
 
 
@@ -319,56 +249,35 @@ if page == "About":
 # ======================================================
 elif page == "Dataset":
     st.markdown('<div class="section-title">📊 Dataset</div>', unsafe_allow_html=True)
+    df = st.session_state.df
+    target = st.session_state.target
 
-    # auto-load kalau belum ada
-    if st.session_state.df is None:
-        st.session_state.df = try_load_default()
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader("📌 Auto Load Dataset (tanpa upload)")
+    st.write(f"File default yang dicari: `{DEFAULT_DATA_PATH}` (harus satu folder dengan `app.py`).")
+    st.write(f"Target default: `{DEFAULT_TARGET}`")
 
-    left, right = st.columns([1, 2])
+    colA, colB = st.columns([1, 1])
+    with colA:
+        new_target = st.text_input("Nama kolom target", value=target)
+    with colB:
+        if st.button("🔄 Reload Dataset", use_container_width=True):
+            st.session_state.df = try_load_default()
+            st.session_state.target = new_target.strip()
+            reset_training_state()
+            st.rerun()
 
-    with left:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("📤 Ganti Dataset (Opsional)")
-        st.caption("default dataset auto-load dari CSV di repo. upload hanya kalau mau ganti dataset.")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-        up = st.file_uploader("Upload file CSV (opsional)", type=["csv"])
-        target_guess = st.text_input("Nama kolom target", value=st.session_state.target)
-
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Pakai Dataset Ini", use_container_width=True):
-                if up is not None:
-                    st.session_state.df = pd.read_csv(up)
-                else:
-                    st.session_state.df = try_load_default()
-
-                st.session_state.target = target_guess.strip()
-                st.session_state.preprocessed = False
-                reset_training()
-
-        with c2:
-            if st.button("Reset ke Default", use_container_width=True):
-                st.session_state.df = try_load_default()
-                st.session_state.preprocessed = False
-                reset_training()
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with right:
-        df = st.session_state.df
-        if df is None:
-            st.warning(
-                "dataset default tidak ditemukan.\n\n"
-                f"pastikan file **{DEFAULT_DATA_PATH}** ada sefolder app.py di GitHub repo, atau upload CSV manual di kiri."
-            )
-        else:
-            df2 = normalize_cols(df)
-            target_col = find_target_col(df2, st.session_state.target)
-
-            st.markdown(f'<div class="success-wrap">✅ Data berhasil dimuat: {len(df2):,} records</div>', unsafe_allow_html=True)
-            kpi_df(df2, target_col)
-            st.markdown('<div class="section-title">📑 Dataset Preview</div>', unsafe_allow_html=True)
-            st.dataframe(df2.head(50), use_container_width=True)
+    df = st.session_state.df
+    if df is None:
+        st.error("dataset belum kebaca. pastikan file CSV sudah ada di repo dan namanya benar.")
+        st.info("saran: rename file jadi `heart_failure.csv` lalu push ke GitHub dan reboot app di Streamlit Cloud.")
+    else:
+        st.markdown(f'<div class="success-wrap">✅ Data berhasil dimuat: {len(df):,} records</div>', unsafe_allow_html=True)
+        kpi_df(df)
+        st.markdown('<div class="section-title">📑 Dataset Preview</div>', unsafe_allow_html=True)
+        st.dataframe(df.head(50), use_container_width=True)
 
 
 # ======================================================
@@ -378,12 +287,11 @@ elif page == "Preprocessing":
     st.markdown('<div class="section-title">⚙️ Preprocessing</div>', unsafe_allow_html=True)
 
     df = st.session_state.df
-    if df is None:
-        st.warning("dataset belum kebaca. cek halaman Dataset dulu.")
-    else:
-        df2 = normalize_cols(df)
-        target_col = find_target_col(df2, st.session_state.target)
+    target = st.session_state.target
 
+    if df is None:
+        st.warning("dataset belum kebaca. cek halaman Dataset.")
+    else:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.subheader("Setting Preprocessing")
 
@@ -391,25 +299,23 @@ elif page == "Preprocessing":
         dropna = st.checkbox("hapus baris yang ada missing (dropna)", value=False)
 
         if st.button("Terapkan Preprocessing", use_container_width=True):
-            work = df2.copy()
+            work = df.copy()
             if drop_dupe:
                 work = work.drop_duplicates()
             if dropna:
                 work = work.dropna()
 
             st.session_state.df = work
-            st.session_state.preprocessed = True
-            reset_training()
+            reset_training_state()
             st.success("preprocessing selesai diterapkan ✅")
 
         st.divider()
 
-        if target_col is None:
-            st.error(f"kolom target '{st.session_state.target}' tidak ditemukan. cek lagi di halaman Dataset.")
+        if target not in df.columns:
+            st.error(f"kolom target '{target}' tidak ditemukan.")
         else:
             st.write("fitur (X) = semua kolom selain target")
-            feature_list = [c for c in df2.columns if c != target_col]
-            st.write(feature_list)
+            st.write([c for c in df.columns if c != target])
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -421,68 +327,52 @@ elif page == "Visualisasi":
     st.markdown('<div class="section-title">📊 Visualisasi</div>', unsafe_allow_html=True)
 
     df = st.session_state.df
-    if df is None:
-        st.warning("dataset belum kebaca. cek halaman Dataset dulu.")
-    else:
-        df2 = normalize_cols(df)
-        target_col = find_target_col(df2, st.session_state.target)
+    target = st.session_state.target
 
+    if df is None:
+        st.warning("dataset belum kebaca. cek halaman Dataset.")
+    elif target not in df.columns:
+        st.error(f"kolom target '{target}' tidak ditemukan.")
+    else:
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        kpi_df(df2, target_col)
+        kpi_df(df)
         st.markdown("</div>", unsafe_allow_html=True)
 
-        if target_col is None:
-            st.error(f"kolom target '{st.session_state.target}' tidak ditemukan.")
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.subheader("Distribusi Target (0 vs 1)")
+        vc = df[target].value_counts().reset_index()
+        vc.columns = [target, "count"]
+        fig = px.bar(vc, x=target, y="count")
+        fig.update_layout(height=360)
+        st.plotly_chart(fig, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.subheader("Perbandingan Fitur per Kelas (Boxplot)")
+        num_cols = [c for c in df.columns if c != target and pd.api.types.is_numeric_dtype(df[c])]
+        if len(num_cols) == 0:
+            st.info("tidak ada fitur numerik untuk divisualisasikan.")
         else:
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.subheader("Distribusi Target (0 vs 1)")
-            vc = df2[target_col].value_counts().reset_index()
-            vc.columns = [target_col, "count"]
-            fig = px.bar(vc, x=target_col, y="count")
-            fig.update_layout(height=380)
-            st.plotly_chart(fig, use_container_width=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.subheader("Heatmap Korelasi (Numerik)")
-            num_df = df2.select_dtypes(include=[np.number]).copy()
-            if num_df.shape[1] < 2:
-                st.info("kolom numerik kurang untuk korelasi.")
-            else:
-                corr = num_df.corr(numeric_only=True)
-                fig2 = px.imshow(corr, aspect="auto")
-                fig2.update_layout(height=520)
-                st.plotly_chart(fig2, use_container_width=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.subheader("Perbandingan Fitur per Kelas (Boxplot)")
-
-            feature_cols = [c for c in df2.columns if c != target_col]
-            feature_cols = [c for c in feature_cols if pd.api.types.is_numeric_dtype(df2[c])]
-
-            if len(feature_cols) == 0:
-                st.info("tidak ada fitur numerik untuk dibandingkan.")
-            else:
-                pick = st.selectbox("pilih fitur:", feature_cols, index=0)
-                fig3 = px.box(df2, x=target_col, y=pick, points="all")
-                fig3.update_layout(height=420)
-                st.plotly_chart(fig3, use_container_width=True)
-
-            st.markdown("</div>", unsafe_allow_html=True)
+            pick = st.selectbox("Pilih fitur:", num_cols, index=0)
+            fig2 = px.box(df, x=target, y=pick, points="all")
+            fig2.update_layout(height=420)
+            st.plotly_chart(fig2, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ======================================================
-# MACHINE LEARNING (5 METODE) + TERBAIK + LANGKAH
+# MACHINE LEARNING (5 METODE)
 # ======================================================
 elif page == "Machine Learning (5 Metode)":
     st.markdown('<div class="section-title">🤖 Machine Learning (5 Metode)</div>', unsafe_allow_html=True)
 
     df = st.session_state.df
+    target = st.session_state.target
+
     if df is None:
-        st.warning("dataset belum kebaca. cek halaman Dataset dulu.")
+        st.warning("dataset belum kebaca. cek halaman Dataset.")
     else:
-        X, y, target_col, err = clean_Xy(df, st.session_state.target)
+        X, y, err = clean_Xy(df, target)
         if err:
             st.error(err)
         else:
@@ -512,7 +402,7 @@ elif page == "Machine Learning (5 Metode)":
                 best_score = -1
                 best_name = None
                 best_pipe = None
-                best_pack = None
+                best_metrics = None
 
                 for name, model in models.items():
                     pipe = make_pipeline(model)
@@ -527,16 +417,9 @@ elif page == "Machine Learning (5 Metode)":
                             y_proba = None
 
                     m = eval_binary(y_test, y_pred, y_proba)
+                    rows.append({"model": name, **m})
 
-                    rows.append({
-                        "model": name,
-                        "accuracy": m["accuracy"],
-                        "precision": m["precision"],
-                        "recall": m["recall"],
-                        "f1": m["f1"],
-                        "auc": m["auc"]
-                    })
-
+                    # pilih skor terbaik
                     if metric_pick == "F1-score":
                         score = m["f1"]
                     elif metric_pick == "AUC":
@@ -548,7 +431,7 @@ elif page == "Machine Learning (5 Metode)":
                         best_score = score
                         best_name = name
                         best_pipe = pipe
-                        best_pack = {"metrics": m}
+                        best_metrics = m
 
                 results_df = pd.DataFrame(rows).sort_values("f1", ascending=False)
 
@@ -556,213 +439,234 @@ elif page == "Machine Learning (5 Metode)":
                 st.session_state.results = results_df
                 st.session_state.best_model_name = best_name
                 st.session_state.best_pipeline = best_pipe
-                st.session_state.best_metrics = best_pack["metrics"]
+                st.session_state.best_metrics = best_metrics
+                st.session_state.feature_cols = list(X.columns)
 
                 st.success(f"selesai training ✅ metode terbaik: **{best_name}**")
 
             st.markdown("</div>", unsafe_allow_html=True)
 
-            # ===== tampil hasil jika sudah train =====
             if st.session_state.results is not None:
                 st.markdown('<div class="card">', unsafe_allow_html=True)
                 st.subheader("Tabel Hasil 5 Metode")
-                st.dataframe(st.session_state.results, use_container_width=True)
+                show = st.session_state.results.copy()
+                # rapiin angka
+                for c in ["accuracy", "precision", "recall", "f1", "auc"]:
+                    if c in show.columns:
+                        show[c] = show[c].astype(float).round(4)
+                st.dataframe(show, use_container_width=True)
 
-                figm = px.bar(st.session_state.results, x="model", y="f1")
-                figm.update_layout(height=360, title="Perbandingan F1-score (5 Metode)")
+                figm = px.bar(st.session_state.results, x="model", y="f1", title="Perbandingan F1-score")
+                figm.update_layout(height=360)
                 st.plotly_chart(figm, use_container_width=True)
-
-                # ===== METODE TERBAIK + METRIK =====
-                best_name = st.session_state.best_model_name
-                best_metrics = st.session_state.best_metrics
-
-                st.markdown(f'<div class="success-wrap">🏆 Metode Terbaik: {best_name}</div>', unsafe_allow_html=True)
-
-                a1, a2, a3, a4 = st.columns(4)
-                a1.metric("Accuracy", f"{best_metrics['accuracy']:.4f}")
-                a2.metric("Precision", f"{best_metrics['precision']:.4f}")
-                a3.metric("Recall", f"{best_metrics['recall']:.4f}")
-                a4.metric("F1-score", f"{best_metrics['f1']:.4f}")
-
-                if best_metrics.get("auc") is not None:
-                    st.info(f"AUC: {best_metrics['auc']:.4f}")
-
-                st.divider()
-
-                # ===== LANGKAH SESUAI METODE TERBAIK =====
-                render_steps_for_best_model(best_name)
-
                 st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ======================================================
-# ANALYSIS TERBAIK
+# METODE TERBAIK (STEP BY STEP)
 # ======================================================
-elif page == "Analysis Terbaik":
-    st.markdown('<div class="section-title">🧠 Analysis Terbaik</div>', unsafe_allow_html=True)
+elif page == "Metode Terbaik":
+    st.markdown('<div class="section-title">🏆 Metode Terbaik</div>', unsafe_allow_html=True)
 
-    df = st.session_state.df
-    if df is None:
-        st.warning("dataset belum kebaca. cek halaman Dataset dulu.")
-    elif not st.session_state.trained_all:
-        st.warning("train 5 metode dulu di halaman Machine Learning.")
+    if not st.session_state.trained_all:
+        st.warning("jalankan training 5 metode dulu di halaman Machine Learning.")
     else:
-        df2 = normalize_cols(df)
-        target_col = find_target_col(df2, st.session_state.target)
-        if target_col is None:
-            st.error(f"kolom target '{st.session_state.target}' tidak ditemukan.")
+        best_name = st.session_state.best_model_name
+        best_metrics = st.session_state.best_metrics
+
+        st.markdown(f'<div class="success-wrap">✅ Metode terbaik terpilih: <b>{best_name}</b></div>', unsafe_allow_html=True)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Accuracy", f"{best_metrics['accuracy']:.4f}")
+        c2.metric("Precision", f"{best_metrics['precision']:.4f}")
+        c3.metric("Recall", f"{best_metrics['recall']:.4f}")
+        c4.metric("F1-score", f"{best_metrics['f1']:.4f}")
+        if best_metrics.get("auc") is not None:
+            st.info(f"AUC: {best_metrics['auc']:.4f}")
+
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.subheader("📌 Langkah Kerja Metode Terbaik (sesuai model yang menang)")
+
+        if best_name == "Random Forest":
+            st.write("""
+1) membagi data jadi train & test  
+2) membuat banyak decision tree dari sampel data random (bootstrap)  
+3) setiap split memilih subset fitur secara acak  
+4) prediksi = voting mayoritas dari semua tree  
+5) evaluasi hasil dengan accuracy / precision / recall / f1 / auc  
+            """)
+        elif best_name == "Gradient Boosting":
+            st.write("""
+1) mulai dari model sederhana (tree kecil)  
+2) hitung error prediksi (residual)  
+3) buat tree baru untuk memperbaiki error sebelumnya  
+4) ulangi bertahap sampai jumlah tree terpenuhi  
+5) prediksi akhir = gabungan semua tree  
+6) evaluasi dengan accuracy / precision / recall / f1 / auc  
+            """)
+        elif best_name == "Logistic Regression":
+            st.write("""
+1) normalisasi fitur (scaling)  
+2) hitung probabilitas kelas 1 pakai fungsi sigmoid  
+3) training mencari koefisien terbaik (optimisasi)  
+4) hasil probabilitas diubah ke 0/1 pakai threshold  
+5) evaluasi dengan accuracy / precision / recall / f1 / auc  
+            """)
+        elif best_name == "SVM (RBF)":
+            st.write("""
+1) normalisasi fitur (scaling)  
+2) cari hyperplane pemisah terbaik dengan margin terbesar  
+3) kernel RBF membantu pemisahan kalau pola tidak linear  
+4) hasil kelas ditentukan dari sisi hyperplane  
+5) evaluasi dengan accuracy / precision / recall / f1 / auc  
+            """)
+        elif best_name == "KNN":
+            st.write("""
+1) normalisasi fitur (scaling)  
+2) tentukan nilai k (jumlah tetangga)  
+3) hitung jarak data baru ke data train  
+4) ambil k tetangga terdekat  
+5) voting mayoritas = kelas prediksi  
+6) evaluasi dengan accuracy / precision / recall / f1 / auc  
+            """)
         else:
-            best_name = st.session_state.best_model_name
-            pipe = st.session_state.best_pipeline
+            st.write("step model belum disediakan.")
 
-            feature_cols = [c for c in df2.columns if c != target_col]
-            feature_cols = [c for c in feature_cols if pd.api.types.is_numeric_dtype(df2[c])]
-
-            st.markdown(f'<div class="success-wrap">✅ Model terbaik aktif: {best_name}</div>', unsafe_allow_html=True)
-
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.subheader("Perbandingan Rata-rata Fitur (kelas 0 vs 1)")
-            grp = df2.groupby(target_col)[feature_cols].mean().T
-            if grp.shape[1] == 2:
-                grp.columns = [f"{target_col}=0", f"{target_col}=1"]
-            st.dataframe(grp, use_container_width=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            st.subheader("Fitur Paling Berpengaruh (dari model)")
-            model = pipe.named_steps.get("model", None)
-
-            if model is not None and hasattr(model, "feature_importances_"):
-                imp = pd.DataFrame({
-                    "Fitur": feature_cols,
-                    "Importance": model.feature_importances_
-                }).sort_values("Importance", ascending=False)
-
-                topn = st.slider("Top-N (importance)", 5, min(20, len(feature_cols)), 10)
-                imp_top = imp.head(topn)
-                fig = px.bar(imp_top[::-1], x="Importance", y="Fitur", orientation="h")
-                fig.update_layout(height=420, title="Feature Importance")
-                st.plotly_chart(fig, use_container_width=True)
-
-                st.caption("semakin besar importance → semakin besar kontribusi fitur ke keputusan model.")
-
-            elif model is not None and hasattr(model, "coef_"):
-                coef = model.coef_[0]
-                coef_df = pd.DataFrame({"Fitur": feature_cols, "Koefisien": coef}).sort_values("Koefisien", ascending=False)
-
-                topn = st.slider("Top-N (koefisien)", 5, min(20, len(feature_cols)), 10)
-                fig = px.bar(coef_df.head(topn)[::-1], x="Koefisien", y="Fitur", orientation="h")
-                fig.update_layout(height=420, title="Koefisien Model (Logistic Regression)")
-                st.plotly_chart(fig, use_container_width=True)
-                st.caption("koefisien positif → cenderung menaikkan risiko kelas 1, negatif → menurunkan.")
-
-            else:
-                st.info("model ini tidak punya importance/coef yang gampang ditampilkan.")
-
-            st.divider()
-            st.subheader("Visual Cepat (Boxplot fitur vs kelas)")
-            if len(feature_cols) > 0:
-                pick = st.selectbox("pilih fitur:", feature_cols, index=0, key="boxpick_analysis")
-                fig2 = px.box(df2, x=target_col, y=pick, points="all")
-                fig2.update_layout(height=420)
-                st.plotly_chart(fig2, use_container_width=True)
-
-            st.markdown("</div>", unsafe_allow_html=True)
+        st.caption("buat dosen: metode terbaik dipilih berdasarkan metrik yang kamu set saat training (default F1-score).")
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ======================================================
-# PREDIKSI (masih upload CSV data baru)
+# PREDIKSI (FORM INPUT PASIEN)
 # ======================================================
 elif page == "Prediksi":
-    st.markdown('<div class="section-title">🔮 Prediksi Data Baru</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">🧾 Prediksi Risiko (Input Pasien)</div>', unsafe_allow_html=True)
+    st.caption("input numerik + interpretasi kategori klinis")
 
     df_train = st.session_state.df
+    target = st.session_state.target
+
     if df_train is None:
-        st.warning("dataset belum kebaca. cek halaman Dataset dulu.")
+        st.warning("dataset belum kebaca. cek halaman Dataset.")
     elif not st.session_state.trained_all:
         st.warning("train 5 metode dulu biar ada model terbaik.")
     else:
-        df_train2 = normalize_cols(df_train)
-        target_col = find_target_col(df_train2, st.session_state.target)
-        if target_col is None:
-            st.error(f"kolom target '{st.session_state.target}' tidak ditemukan.")
-        else:
-            pipe = st.session_state.best_pipeline
-            best_name = st.session_state.best_model_name
+        pipe = st.session_state.best_pipeline
+        best_name = st.session_state.best_model_name
+        feature_cols = st.session_state.feature_cols
 
-            feature_cols = [c for c in df_train2.columns if c != target_col]
-            feature_cols = [c for c in feature_cols if pd.api.types.is_numeric_dtype(df_train2[c])]
+        st.markdown(f'<div class="success-wrap">✅ Model aktif: <b>{best_name}</b></div>', unsafe_allow_html=True)
 
-            st.markdown(f'<div class="success-wrap">✅ Model aktif: {best_name}</div>', unsafe_allow_html=True)
+        # helper default median
+        def default_val(col):
+            try:
+                return float(df_train[col].median())
+            except Exception:
+                return 0.0
 
-            col_left, col_right = st.columns([1, 1])
-            with col_left:
-                st.markdown('<div class="card">', unsafe_allow_html=True)
-                st.subheader("📤 Upload Data Baru")
-                new_file = st.file_uploader("Upload file CSV", type=["csv"], key="new_data_file")
-                st.caption("file baru harus punya kolom fitur yang sama seperti data training.")
-                st.markdown("</div>", unsafe_allow_html=True)
+        # label lebih enak
+        label_map = {
+            "age": "Usia (Tahun)",
+            "sex": "Jenis Kelamin",
+            "diabetes": "Diabetes",
+            "high_blood_pressure": "Tekanan Darah Tinggi",
+            "smoking": "Merokok",
+            "creatinine_phosphokinase": "Creatinine Phosphokinase (CPK)",
+            "ejection_fraction": "Ejection Fraction (%)",
+            "serum_creatinine": "Serum Creatinine",
+            "serum_sodium": "Serum Sodium",
+            "platelets": "Platelets",
+            "time": "Follow-up Time (days)",
+            "anaemia": "Anaemia",
+        }
 
-            with col_right:
-                st.markdown('<div class="card">', unsafe_allow_html=True)
-                st.subheader("⚙️ Algoritma")
-                st.selectbox("Algoritma:", [f"Metode Terbaik: {best_name}"], index=0)
-                run = st.button("🚀 Jalankan Prediksi", use_container_width=True)
-                st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.subheader("📋 Input Data Pasien")
 
-            if run:
-                if new_file is None:
-                    st.warning("upload file CSV dulu.")
-                else:
-                    new_df = pd.read_csv(new_file)
-                    new_df = normalize_cols(new_df)
+        # layout 3 kolom seperti contoh
+        c1, c2, c3 = st.columns(3)
+        input_dict = {}
 
-                    missing = set(feature_cols) - set(new_df.columns)
-                    if missing:
-                        st.error(f"kolom ini tidak ada di file baru: {sorted(list(missing))}")
-                    else:
-                        X_new = new_df[feature_cols].copy()
-                        X_new = X_new.select_dtypes(include=[np.number])
+        # ========= kolom 1 =========
+        with c1:
+            if "age" in feature_cols:
+                input_dict["age"] = st.number_input(label_map["age"], 0.0, 120.0, default_val("age"), 1.0)
 
-                        preds = pipe.predict(X_new)
+            if "creatinine_phosphokinase" in feature_cols:
+                input_dict["creatinine_phosphokinase"] = st.number_input(
+                    label_map["creatinine_phosphokinase"], 0.0, value=default_val("creatinine_phosphokinase"), step=1.0
+                )
 
-                        proba = None
-                        if hasattr(pipe, "predict_proba"):
-                            try:
-                                proba = pipe.predict_proba(X_new)[:, 1]
-                            except Exception:
-                                proba = None
+            if "ejection_fraction" in feature_cols:
+                input_dict["ejection_fraction"] = st.number_input(
+                    label_map["ejection_fraction"], 0.0, 100.0, default_val("ejection_fraction"), 1.0
+                )
 
-                        out = new_df.copy()
-                        out["Prediksi_Risiko"] = preds
-                        if proba is not None:
-                            out["Prob_Risiko_Tinggi"] = proba
+        # ========= kolom 2 =========
+        with c2:
+            if "sex" in feature_cols:
+                sex_opt = st.selectbox(label_map["sex"], ["Female", "Male"], index=1)
+                input_dict["sex"] = 1.0 if sex_opt == "Male" else 0.0
 
-                        st.success("prediksi selesai ✅")
-                        a, b = st.columns(2)
-                        a.metric("Risiko Rendah (0)", int((preds == 0).sum()))
-                        b.metric("Risiko Tinggi (1)", int((preds == 1).sum()))
+            if "serum_creatinine" in feature_cols:
+                input_dict["serum_creatinine"] = st.number_input(
+                    label_map["serum_creatinine"], 0.0, value=default_val("serum_creatinine"), step=0.1
+                )
 
-                        st.markdown('<div class="card">', unsafe_allow_html=True)
-                        st.subheader("📄 Hasil Prediksi")
-                        st.dataframe(out, use_container_width=True)
+            if "serum_sodium" in feature_cols:
+                input_dict["serum_sodium"] = st.number_input(
+                    label_map["serum_sodium"], 0.0, value=default_val("serum_sodium"), step=1.0
+                )
 
-                        pie_df = pd.DataFrame({
-                            "kelas": ["0 (rendah)", "1 (tinggi)"],
-                            "jumlah": [int((preds == 0).sum()), int((preds == 1).sum())]
-                        })
-                        figp = px.pie(pie_df, names="kelas", values="jumlah")
-                        figp.update_layout(height=360, title="Proporsi Hasil Prediksi")
-                        st.plotly_chart(figp, use_container_width=True)
+        # ========= kolom 3 =========
+        with c3:
+            # indikator komorbid biner
+            for bin_col in ["anaemia", "diabetes", "high_blood_pressure", "smoking"]:
+                if bin_col in feature_cols:
+                    v = st.selectbox(label_map.get(bin_col, bin_col), ["Tidak", "Ya"], index=int(round(default_val(bin_col))))
+                    input_dict[bin_col] = 1.0 if v == "Ya" else 0.0
 
-                        csv_bytes = out.to_csv(index=False).encode("utf-8")
-                        st.download_button(
-                            "⬇️ Download hasil prediksi (CSV)",
-                            csv_bytes,
-                            file_name="hasil_prediksi.csv",
-                            mime="text/csv"
-                        )
-                        st.markdown("</div>", unsafe_allow_html=True)
+            if "platelets" in feature_cols:
+                input_dict["platelets"] = st.number_input(
+                    label_map["platelets"], 0.0, value=default_val("platelets"), step=1000.0
+                )
+
+        # full width bawah (misal time)
+        if "time" in feature_cols:
+            input_dict["time"] = st.number_input(label_map["time"], 0.0, value=default_val("time"), step=1.0)
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        run = st.button("🔍 Prediksi Risiko", use_container_width=True)
+
+        if run:
+            # pastikan semua fitur ada
+            for col in feature_cols:
+                if col not in input_dict:
+                    input_dict[col] = default_val(col)
+
+            X_new = pd.DataFrame([input_dict], columns=feature_cols)
+
+            pred = int(pipe.predict(X_new)[0])
+
+            proba = None
+            if hasattr(pipe, "predict_proba"):
+                try:
+                    proba = float(pipe.predict_proba(X_new)[:, 1][0])
+                except Exception:
+                    proba = None
+
+            if pred == 1:
+                st.error("⚠️ Prediksi: Risiko Tinggi (kelas 1)")
+            else:
+                st.success("✅ Prediksi: Risiko Rendah (kelas 0)")
+
+            if proba is not None:
+                st.info(f"Probabilitas kelas 1 (risiko tinggi): {proba:.3f}")
+
+            st.caption("catatan: ini prediksi model dari pola data training, bukan diagnosis medis.")
+        st.markdown("</div>", unsafe_allow_html=True)
 
 
 # ======================================================
@@ -770,8 +674,8 @@ elif page == "Prediksi":
 # ======================================================
 elif page == "Contact":
     st.markdown('<div class="section-title">📞 Contact</div>', unsafe_allow_html=True)
-    st.markdown('<div class="card">', unsafe_allow_html=True)
 
+    st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("""
 **Nama Mahasiswa:** Fadilah Andriana Putri Ayunda  
 **Program Studi:** S1 Sains Data  
@@ -779,5 +683,4 @@ elif page == "Contact":
 
 📧 **Email:** Ayundafadilah9@gmail.com
 """)
-
     st.markdown("</div>", unsafe_allow_html=True)
